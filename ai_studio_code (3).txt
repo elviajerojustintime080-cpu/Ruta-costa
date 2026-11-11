@@ -1,0 +1,801 @@
+import React, { useState, useEffect } from 'react';
+import { createClient } from '@supabase/supabase-js';
+import { 
+  Navigation, Car, User, ShieldCheck, MapPin, 
+  Send, Phone, MessageSquare, Share2, Award, 
+  Compass, WifiOff, CheckCircle2, AlertCircle, RefreshCw
+} from 'lucide-react';
+import { RutaMap } from './components/RutaMap';
+import { sound } from './utils/soundEngine';
+import { EXACT_DESTINATIONS, TOURIST_ZONES, SAVED_LOCALITIES, LocationItem } from './data/locations';
+
+// Configura con tus variables de proyecto Supabase
+const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://tu-proyecto.supabase.co';
+const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || 'tu-anon-key';
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+export function App() {
+  // Selector global de modo permanente
+  const [roleMode, setRoleMode] = useState<'passenger' | 'driver'>(() => {
+    return (localStorage.getItem('rc_role') as 'passenger' | 'driver') || 'passenger';
+  });
+
+  // Pestañas Pasajero: Inicio, Viajes, Zonas, Cuenta, Compartido
+  const [passengerTab, setPassengerTab] = useState<'inicio' | 'viajes' | 'zonas' | 'cuenta' | 'compartido'>('inicio');
+
+  // Estado de Conectividad
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  // GPS Usuario
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [gpsError, setGpsError] = useState<string | null>(null);
+
+  // Estados de Viaje
+  const [origin, setOrigin] = useState<LocationItem>(EXACT_DESTINATIONS[0]);
+  const [dest, setDest] = useState<LocationItem>(EXACT_DESTINATIONS[1]);
+  const [category, setCategory] = useState<'moto' | 'economico' | 'confort' | 'xl'>('economico');
+  const [currentRide, setCurrentRide] = useState<any>(null);
+  const [sharedRideCode, setSharedRideCode] = useState('');
+  const [trackedSharedRide, setTrackedSharedRide] = useState<any>(null);
+
+  // Chat
+  const [chatMessages, setChatMessages] = useState<any[]>([]);
+  const [inputMessage, setInputMessage] = useState('');
+
+  // Estados Conductor
+  const [driverProfile, setDriverProfile] = useState<any>(null);
+  const [isDriverOnline, setIsDriverOnline] = useState(false);
+  const [availableRides, setAvailableRides] = useState<any[]>([]);
+
+  // Búsqueda de calles
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+
+  // Admin Modal
+  const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [adminPin, setAdminPin] = useState('');
+  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
+  const [systemSettings, setSystemSettings] = useState<any>({
+    clabe_number: '012840000000000000',
+    bank_name: 'BBVA México',
+    account_holder: 'Administración Ruta Costa'
+  });
+  const [pendingRecharges, setPendingRecharges] = useState<any[]>([]);
+  const [pendingDrivers, setPendingDrivers] = useState<any[]>([]);
+
+  // Escuchar Conexión
+  useEffect(() => {
+    const handleOnline = () => { setIsOnline(true); sound.play('senal_recuperada'); };
+    const handleOffline = () => { setIsOnline(false); sound.play('senal_perdida'); };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Guardar Modo
+  const changeRoleMode = (mode: 'passenger' | 'driver') => {
+    setRoleMode(mode);
+    localStorage.setItem('rc_role', mode);
+  };
+
+  // Solicitar GPS Real con Explicación
+  const requestGPS = () => {
+    if (!navigator.geolocation) {
+      setGpsError('Este dispositivo o navegador no soporta geolocalización.');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const coords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        setUserCoords(coords);
+        setGpsError(null);
+        setOrigin({
+          id: 'user_gps',
+          name: 'Mi Ubicación Actual',
+          locality: 'San Andrés Tuxtla',
+          lat: coords.lat,
+          lng: coords.lng
+        });
+      },
+      (err) => {
+        setGpsError('Sin GPS: Permiso no otorgado o satélites no disponibles.');
+      },
+      { enableHighAccuracy: true, timeout: 12000 }
+    );
+  };
+
+  // Cálculo de Tarifas con Ejemplo Real (Mercado -> Centro = $26.70)
+  const calculateFare = (cat: string) => {
+    const basePrices = { moto: 18.0, economico: 22.0, confort: 28.0, xl: 35.0 };
+    const perKm = { moto: 5.0, economico: 7.25, confort: 9.5, xl: 12.0 };
+    
+    // Distancia Euclidiana simplificada ajustada
+    const dist = Math.sqrt(
+      Math.pow((dest.lat - origin.lat) * 111, 2) + 
+      Math.pow((dest.lng - origin.lng) * 111 * Math.cos(origin.lat * Math.PI / 180), 2)
+    );
+    const calculated = (basePrices as any)[cat] + (dist * (perKm as any)[cat]);
+    return Number(calculated.toFixed(2));
+  };
+
+  // Solicitar Viaje Real
+  const requestRide = async () => {
+    if (!isOnline) {
+      alert('Sin señal: No es posible solicitar viajes nuevos en modo offline.');
+      return;
+    }
+    const fare = calculateFare(category);
+    const commission = Number((fare * 0.10).toFixed(2));
+    const randomPin = Math.floor(1000 + Math.random() * 9000).toString();
+    const shareCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+
+    const newRideData = {
+      share_code: shareCode,
+      passenger_name: 'Pasajero Local',
+      passenger_phone: '2941000000',
+      origin_name: origin.name,
+      origin_lat: origin.lat,
+      origin_lng: origin.lng,
+      dest_name: dest.name,
+      dest_lat: dest.lat,
+      dest_lng: dest.lng,
+      category,
+      fare,
+      commission,
+      boarding_pin: randomPin,
+      status: 'buscando_conductor',
+      passenger_lat: userCoords?.lat || origin.lat,
+      passenger_lng: userCoords?.lng || origin.lng
+    };
+
+    const { data, error } = await supabase.from('rides').insert([newRideData]).select().single();
+    if (error) {
+      alert('Error al conectar con la central de viajes.');
+      return;
+    }
+
+    setCurrentRide(data);
+    sound.play('nuevo_viaje');
+  };
+
+  // Suscripción Realtime al Viaje
+  useEffect(() => {
+    if (!currentRide?.id) return;
+
+    const channel = supabase
+      .channel(`ride_${currentRide.id}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'rides', filter: `id=eq.${currentRide.id}` }, (payload) => {
+        setCurrentRide(payload.new);
+        sound.play(payload.new.status);
+      })
+      .subscribe();
+
+    const msgChannel = supabase
+      .channel(`chat_${currentRide.id}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'ride_messages', filter: `ride_id=eq.${currentRide.id}` }, (payload) => {
+        setChatMessages((prev) => [...prev, payload.new]);
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+      supabase.removeChannel(msgChannel);
+    };
+  }, [currentRide?.id]);
+
+  // Búsqueda en línea (OSM Nominatim) para cualquier localidad de Veracruz
+  const handleSearchStreet = async (text: string) => {
+    setSearchQuery(text);
+    if (text.length < 3) {
+      setSearchResults([]);
+      return;
+    }
+
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(text + ', Veracruz, Mexico')}&limit=5`);
+      const data = await res.json();
+      setSearchResults(data);
+    } catch {
+      // Búsqueda local con catálogo de localidades
+      const matched = SAVED_LOCALITIES.filter(l => l.toLowerCase().includes(text.toLowerCase())).map(m => ({
+        display_name: `${text}, ${m}, Veracruz`,
+        lat: 18.44849,
+        lon: -95.21204
+      }));
+      setSearchResults(matched);
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-screen w-screen bg-[#ece2c9] text-stone-900 font-sans overflow-hidden">
+      {/* 1. Barra Superior con Selector Permanente de Modo */}
+      <header className="bg-[#0e2617] text-white p-3 shadow-md z-30 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {/* Icono Volcán San Martín Tuxtla */}
+            <div className="w-8 h-8 rounded-full bg-emerald-800 border border-emerald-400 flex items-center justify-center overflow-hidden">
+              <svg className="w-6 h-6 text-emerald-200" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M14 6l-3.75 5 2.85 3.8-1.6 1.2-4.5-6L1 18h22L14 6z" />
+              </svg>
+            </div>
+            <div>
+              <h1 className="font-bold text-lg tracking-wide text-emerald-300">RUTA COSTA</h1>
+              <p className="text-[10px] text-stone-300 -mt-1">San Andrés Tuxtla & Región de Los Tuxtlas</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {!isOnline && (
+              <span className="flex items-center gap-1 text-[11px] bg-red-600 px-2 py-0.5 rounded text-white font-medium">
+                <WifiOff className="w-3 h-3" /> Sin Señal
+              </span>
+            )}
+            <button 
+              onClick={() => setIsAdminOpen(true)}
+              className="p-1.5 bg-emerald-950/80 rounded border border-emerald-600/40 text-emerald-300"
+              title="Panel Admin"
+            >
+              <ShieldCheck className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Selector Grande Pasajero / Conductor */}
+        <div className="grid grid-cols-2 gap-1 p-1 bg-black/30 rounded-lg text-xs font-semibold">
+          <button
+            onClick={() => changeRoleMode('passenger')}
+            className={`py-2 rounded-md transition ${roleMode === 'passenger' ? 'bg-emerald-600 text-white shadow' : 'text-stone-300 hover:text-white'}`}
+          >
+            Pasajero: pedir viajes
+          </button>
+          <button
+            onClick={() => changeRoleMode('driver')}
+            className={`py-2 rounded-md transition ${roleMode === 'driver' ? 'bg-emerald-600 text-white shadow' : 'text-stone-300 hover:text-white'}`}
+          >
+            Conductor: recibir y ganar
+          </button>
+        </div>
+      </header>
+
+      {/* 2. Cuerpo Principal */}
+      <main className="flex-1 relative flex flex-col overflow-hidden">
+        {/* Renderizado Modo Pasajero */}
+        {roleMode === 'passenger' && (
+          <div className="flex-1 flex flex-col h-full relative">
+            {passengerTab === 'inicio' && (
+              <div className="flex-1 flex flex-col relative h-full">
+                {/* Mapa con Leaflet y OSM */}
+                <div className="flex-1 w-full relative">
+                  <RutaMap 
+                    origin={origin} 
+                    dest={dest} 
+                    userLoc={userCoords}
+                  />
+
+                  {/* Botón GPS Flotante */}
+                  <button 
+                    onClick={requestGPS}
+                    className="absolute top-3 right-3 z-20 bg-white/95 text-stone-900 px-3 py-2 rounded-full shadow-lg border border-stone-200 flex items-center gap-2 text-xs font-bold"
+                  >
+                    <Compass className="w-4 h-4 text-emerald-700 animate-spin-slow" />
+                    {userCoords ? 'GPS Listo' : 'Usar mi ubicación real'}
+                  </button>
+
+                  {gpsError && (
+                    <div className="absolute top-14 right-3 z-20 bg-amber-100 text-amber-900 text-[11px] p-2 rounded shadow max-w-[200px]">
+                      {gpsError}
+                    </div>
+                  )}
+                </div>
+
+                {/* Hoja Inferior de Configuración de Viaje */}
+                <div className="bg-white rounded-t-2xl shadow-2xl p-4 z-20 border-t border-stone-200 max-h-[50vh] overflow-y-auto">
+                  {!currentRide ? (
+                    <div className="flex flex-col gap-3">
+                      {/* Búsqueda rápida de calle escrita */}
+                      <div className="relative">
+                        <label className="text-[11px] font-bold text-stone-500 uppercase">Escribir destino en Veracruz</label>
+                        <input 
+                          type="text" 
+                          value={searchQuery}
+                          onChange={(e) => handleSearchStreet(e.target.value)}
+                          placeholder="Calle, avenida o localidad..." 
+                          className="w-full text-xs p-2.5 rounded-lg border border-stone-300 bg-stone-50 focus:bg-white focus:outline-emerald-600"
+                        />
+                        {searchResults.length > 0 && (
+                          <div className="absolute left-0 right-0 top-14 bg-white border border-stone-200 rounded-lg shadow-xl z-50 max-h-40 overflow-y-auto">
+                            {searchResults.map((item, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => {
+                                  setDest({
+                                    id: `search_${idx}`,
+                                    name: item.display_name.split(',')[0],
+                                    locality: 'Veracruz',
+                                    lat: parseFloat(item.lat),
+                                    lng: parseFloat(item.lon)
+                                  });
+                                  setSearchResults([]);
+                                }}
+                                className="w-full text-left p-2 border-b border-stone-100 hover:bg-emerald-50 text-xs"
+                              >
+                                <p className="font-semibold">{item.display_name.split(',')[0]}</p>
+                                <p className="text-[10px] text-stone-500">Localidad: {item.display_name}</p>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Selectores de Origen y Destino de los 14 destinos predefinidos */}
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <span className="text-[10px] font-bold text-emerald-800">ORIGEN:</span>
+                          <select 
+                            value={origin.id} 
+                            onChange={(e) => setOrigin(EXACT_DESTINATIONS.find(d => d.id === e.target.value) || EXACT_DESTINATIONS[0])}
+                            className="w-full text-xs p-2 rounded border border-stone-300 bg-white"
+                          >
+                            {EXACT_DESTINATIONS.map(d => (
+                              <option key={d.id} value={d.id}>{d.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-bold text-red-700">DESTINO:</span>
+                          <select 
+                            value={dest.id} 
+                            onChange={(e) => setDest(EXACT_DESTINATIONS.find(d => d.id === e.target.value) || EXACT_DESTINATIONS[1])}
+                            className="w-full text-xs p-2 rounded border border-stone-300 bg-white"
+                          >
+                            {EXACT_DESTINATIONS.map(d => (
+                              <option key={d.id} value={d.id}>{d.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Categorías de Transporte */}
+                      <div className="grid grid-cols-4 gap-1 py-1">
+                        {[
+                          { id: 'moto', label: 'Moto', icon: '🛵' },
+                          { id: 'economico', label: 'Económico', icon: '🚗' },
+                          { id: 'confort', label: 'Confort', icon: '✨' },
+                          { id: 'xl', label: 'XL Familiar', icon: '🚐' }
+                        ].map((cat) => (
+                          <button
+                            key={cat.id}
+                            onClick={() => setCategory(cat.id as any)}
+                            className={`flex flex-col items-center p-2 rounded-lg border text-center transition ${category === cat.id ? 'border-emerald-700 bg-emerald-50 text-emerald-950 font-bold' : 'border-stone-200'}`}
+                          >
+                            <span className="text-lg">{cat.icon}</span>
+                            <span className="text-[11px] mt-1">{cat.label}</span>
+                            <span className="text-[10px] text-emerald-800 font-extrabold mt-0.5">${calculateFare(cat.id)}</span>
+                          </button>
+                        ))}
+                      </div>
+
+                      <button
+                        onClick={requestRide}
+                        className="w-full bg-emerald-800 hover:bg-emerald-900 text-white font-bold py-3 rounded-xl shadow-lg flex items-center justify-center gap-2 transition"
+                      >
+                        <Car className="w-5 h-5" />
+                        Pedir Viaje Ahora (${calculateFare(category)} MXN)
+                      </button>
+                    </div>
+                  ) : (
+                    /* Tarjeta de Viaje Activo y PIN */
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between border-b pb-2">
+                        <div>
+                          <span className="text-[10px] uppercase font-bold text-stone-400">Estado del viaje</span>
+                          <h4 className="text-base font-bold text-emerald-900 capitalize">{currentRide.status.replace(/_/g, ' ')}</h4>
+                        </div>
+                        <div className="bg-emerald-100 text-emerald-900 border border-emerald-400 px-3 py-1 rounded-lg text-center">
+                          <span className="text-[9px] block font-bold uppercase">PIN de abordaje</span>
+                          <span className="text-lg font-black tracking-widest">{currentRide.boarding_pin}</span>
+                        </div>
+                      </div>
+
+                      {/* Compartir Viaje con Código de 8 letras */}
+                      <div className="flex items-center justify-between bg-stone-100 p-2 rounded-lg">
+                        <div className="text-xs">
+                          <span className="text-stone-500">Código para compartir en vivo:</span>
+                          <p className="font-mono font-bold text-stone-800">{currentRide.share_code}</p>
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (navigator.share) {
+                              navigator.share({
+                                title: 'Sigue mi viaje en Ruta Costa',
+                                text: `Sigue mi viaje en tiempo real con este código: ${currentRide.share_code}`,
+                                url: window.location.href
+                              });
+                            } else {
+                              navigator.clipboard.writeText(currentRide.share_code);
+                              alert('Código de 8 letras copiado al portapapeles');
+                            }
+                          }}
+                          className="bg-white border border-stone-300 p-2 rounded-lg text-xs flex items-center gap-1 font-semibold"
+                        >
+                          <Share2 className="w-4 h-4 text-emerald-700" /> Compartir
+                        </button>
+                      </div>
+
+                      {/* Mensajería Directa Integrada */}
+                      <div className="mt-2 flex flex-col gap-2">
+                        <div className="h-24 overflow-y-auto bg-stone-50 p-2 rounded border border-stone-200 flex flex-col gap-1 text-xs">
+                          {chatMessages.length === 0 ? (
+                            <p className="text-stone-400 text-center italic mt-4">No hay mensajes aún.</p>
+                          ) : (
+                            chatMessages.map((m, idx) => (
+                              <div key={idx} className={`p-1.5 rounded max-w-[80%] ${m.sender_type === 'passenger' ? 'bg-emerald-700 text-white self-end' : 'bg-stone-200 text-stone-800 self-start'}`}>
+                                {m.message}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                        <div className="flex gap-1">
+                          <input
+                            type="text"
+                            value={inputMessage}
+                            onChange={(e) => setInputMessage(e.target.value)}
+                            placeholder="Escribir al conductor..."
+                            className="flex-1 text-xs p-2 rounded border border-stone-300"
+                          />
+                          <button
+                            onClick={async () => {
+                              if (!inputMessage.trim()) return;
+                              await supabase.from('ride_messages').insert([{
+                                ride_id: currentRide.id,
+                                sender_type: 'passenger',
+                                message: inputMessage
+                              }]);
+                              setInputMessage('');
+                            }}
+                            className="bg-emerald-700 text-white p-2 rounded"
+                          >
+                            <Send className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Pestaña: Zonas Turísticas */}
+            {passengerTab === 'zonas' && (
+              <div className="flex-1 p-4 overflow-y-auto bg-[#ece2c9]">
+                <h3 className="font-bold text-lg text-emerald-950 mb-1">Rutas y Zonas de Los Tuxtlas</h3>
+                <p className="text-xs text-stone-600 mb-4">Descubre 8 destinos emblemáticos con traslados directos.</p>
+                <div className="grid grid-cols-1 gap-4">
+                  {TOURIST_ZONES.map((zone) => (
+                    <div key={zone.id} className="bg-white rounded-xl shadow-md p-4 border border-stone-200">
+                      <div className="flex justify-between items-start">
+                        <h4 className="font-bold text-emerald-900">{zone.name}</h4>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded font-medium">Turismo Real</span>
+                      </div>
+                      <p className="text-xs font-medium text-stone-700 mt-1">{zone.title}</p>
+                      <div className="text-[11px] text-stone-500 mt-2 space-y-1">
+                        <p><strong className="text-stone-700">Qué hacer:</strong> {zone.todo}</p>
+                        <p><strong className="text-stone-700">Mejor hora:</strong> {zone.bestTime}</p>
+                        <p><strong className="text-stone-700">Tip:</strong> {zone.recommendation}</p>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setDest({
+                            id: zone.id,
+                            name: zone.name,
+                            locality: 'Los Tuxtlas',
+                            lat: zone.coords.lat,
+                            lng: zone.coords.lng
+                          });
+                          setPassengerTab('inicio');
+                        }}
+                        className="mt-3 w-full bg-emerald-800 text-white py-2 rounded-lg text-xs font-bold shadow hover:bg-emerald-900"
+                      >
+                        Pedir viaje aquí
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pestaña: Seguir Viaje Compartido con Código */}
+            {passengerTab === 'compartido' && (
+              <div className="flex-1 p-4 overflow-y-auto bg-white flex flex-col gap-4">
+                <h3 className="font-bold text-base text-stone-800">Seguimiento Seguro en Vivo</h3>
+                <p className="text-xs text-stone-600">Introduce el código de 8 caracteres proporcionado por tu familiar o amigo para seguir su traslado en tiempo real.</p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={sharedRideCode}
+                    onChange={(e) => setSharedRideCode(e.target.value.toUpperCase())}
+                    placeholder="Ej. AB12CD34"
+                    maxLength={8}
+                    className="flex-1 border p-2 rounded-lg text-sm font-mono uppercase"
+                  />
+                  <button
+                    onClick={async () => {
+                      const { data } = await supabase.from('rides').select('*').eq('share_code', sharedRideCode).single();
+                      if (data) {
+                        setTrackedSharedRide(data);
+                      } else {
+                        alert('Código no encontrado o viaje finalizado.');
+                      }
+                    }}
+                    className="bg-emerald-800 text-white px-4 py-2 rounded-lg text-xs font-bold"
+                  >
+                    Rastrear
+                  </button>
+                </div>
+
+                {trackedSharedRide && (
+                  <div className="border rounded-xl p-3 bg-stone-50 flex flex-col gap-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-bold text-emerald-800">Vehículo en Trayecto</span>
+                      <span className="text-[10px] bg-emerald-200 text-emerald-900 px-2 py-0.5 rounded font-semibold capitalize">{trackedSharedRide.status.replace(/_/g, ' ')}</span>
+                    </div>
+                    <p className="text-xs"><strong>Origen:</strong> {trackedSharedRide.origin_name}</p>
+                    <p className="text-xs"><strong>Destino:</strong> {trackedSharedRide.dest_name}</p>
+                    <div className="h-44 w-full rounded-lg overflow-hidden border mt-2">
+                      <RutaMap
+                        origin={{ lat: trackedSharedRide.origin_lat, lng: trackedSharedRide.origin_lng }}
+                        dest={{ lat: trackedSharedRide.dest_lat, lng: trackedSharedRide.dest_lng }}
+                        driverLoc={trackedSharedRide.driver_lat ? { lat: trackedSharedRide.driver_lat, lng: trackedSharedRide.driver_lng } : null}
+                        interactive={false}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Renderizado Modo Conductor */}
+        {roleMode === 'driver' && (
+          <div className="flex-1 flex flex-col p-4 bg-stone-100 overflow-y-auto">
+            {/* Saldo y Estado Online */}
+            <div className="bg-[#0e2617] text-white p-4 rounded-2xl shadow-lg flex flex-col gap-3">
+              <div className="flex justify-between items-center">
+                <div>
+                  <span className="text-[10px] text-stone-300 font-bold uppercase tracking-wider">Saldo de Créditos</span>
+                  <h2 className="text-2xl font-black text-emerald-400">$100.00 MXN</h2>
+                  <p className="text-[10px] text-stone-300">Comisión del 10% reservada por servicio</p>
+                </div>
+                <button
+                  onClick={() => setIsDriverOnline(!isDriverOnline)}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold border transition ${isDriverOnline ? 'bg-emerald-600 border-emerald-400 text-white' : 'bg-stone-800 border-stone-600 text-stone-300'}`}
+                >
+                  {isDriverOnline ? '● En Línea' : '○ Desconectado'}
+                </button>
+              </div>
+
+              {/* Módulo de Recargas SPEI */}
+              <div className="bg-black/30 p-3 rounded-xl border border-white/10 text-xs">
+                <span className="font-bold text-emerald-300">Recargar Saldo por Transferencia SPEI</span>
+                <p className="text-[11px] text-stone-300 mt-1">Transfiere a la CLABE oficial del Administrador:</p>
+                <div className="bg-black/40 p-2 rounded my-1.5 flex justify-between items-center">
+                  <span className="font-mono text-emerald-200 font-bold">{systemSettings.clabe_number}</span>
+                  <button 
+                    onClick={() => {
+                      navigator.clipboard.writeText(systemSettings.clabe_number);
+                      alert('CLABE copiada al portapapeles');
+                    }}
+                    className="text-[10px] bg-emerald-800 px-2 py-1 rounded text-white"
+                  >
+                    Copiar
+                  </button>
+                </div>
+                <p className="text-[10px] text-stone-300">{systemSettings.bank_name} — {systemSettings.account_holder}</p>
+                <button
+                  onClick={async () => {
+                    const monto = prompt('¿Qué monto transferiste? ($50, $100, $200, $500):', '100');
+                    if (monto) {
+                      await supabase.from('recharges').insert([{
+                        amount: parseFloat(monto),
+                        status: 'pendiente',
+                        reference: 'Aviso manual conductor'
+                      }]);
+                      sound.play('recarga_pendiente');
+                      alert('Aviso enviado. La recarga se acreditará en cuanto el administrador valide el depósito en su banco.');
+                    }
+                  }}
+                  className="mt-2 w-full bg-emerald-700 hover:bg-emerald-600 py-1.5 rounded text-white font-bold text-center"
+                >
+                  Ya transferí — Avisar al Admin
+                </button>
+              </div>
+            </div>
+
+            {/* Lista de Solicitudes de Viaje Entrantes */}
+            <div className="mt-4 flex-1">
+              <h3 className="font-bold text-stone-800 text-sm mb-2 flex items-center justify-between">
+                <span>Viajes Disponibles en la Zona</span>
+                <RefreshCw className="w-4 h-4 text-stone-500 cursor-pointer" />
+              </h3>
+
+              {!isDriverOnline ? (
+                <div className="bg-amber-50 border border-amber-200 text-amber-900 p-4 rounded-xl text-xs text-center">
+                  Ponte en línea arriba para recibir alertas de viajes en tiempo real.
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  <div className="bg-white p-3 rounded-xl border border-stone-200 shadow-sm flex flex-col gap-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-bold text-emerald-900">Mercado Municipal → Centro</span>
+                      <span className="text-sm font-extrabold text-stone-900">$26.70 MXN</span>
+                    </div>
+                    <p className="text-[11px] text-stone-500">Comisión Ruta Costa (10%): $2.67 MXN</p>
+                    <div className="flex gap-2 mt-1">
+                      <button 
+                        onClick={() => {
+                          sound.play('viaje_asignado');
+                          alert('Viaje aceptado con éxito. Dirígete al punto de recogida.');
+                        }}
+                        className="flex-1 bg-emerald-800 text-white py-2 rounded-lg font-bold text-xs shadow"
+                      >
+                        Aceptar Viaje
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* 3. Navegación Inferior (Modo Pasajero) */}
+      {roleMode === 'passenger' && (
+        <nav className="bg-white border-t border-stone-200 grid grid-cols-4 py-2 z-30 text-stone-600">
+          <button 
+            onClick={() => setPassengerTab('inicio')}
+            className={`flex flex-col items-center gap-0.5 ${passengerTab === 'inicio' ? 'text-emerald-800 font-bold' : ''}`}
+          >
+            <Navigation className="w-5 h-5" />
+            <span className="text-[10px]">Inicio</span>
+          </button>
+          <button 
+            onClick={() => setPassengerTab('zonas')}
+            className={`flex flex-col items-center gap-0.5 ${passengerTab === 'zonas' ? 'text-emerald-800 font-bold' : ''}`}
+          >
+            <MapPin className="w-5 h-5" />
+            <span className="text-[10px]">Turismo</span>
+          </button>
+          <button 
+            onClick={() => setPassengerTab('compartido')}
+            className={`flex flex-col items-center gap-0.5 ${passengerTab === 'compartido' ? 'text-emerald-800 font-bold' : ''}`}
+          >
+            <Share2 className="w-5 h-5" />
+            <span className="text-[10px]">Compartido</span>
+          </button>
+          <button 
+            onClick={() => {
+              const testSnd = prompt('Probar sonido: nuevo_viaje, viaje_completado, recarga_confirmada, senal_perdida', 'nuevo_viaje');
+              if (testSnd) sound.play(testSnd);
+            }}
+            className="flex flex-col items-center gap-0.5"
+          >
+            <Award className="w-5 h-5" />
+            <span className="text-[10px]">Sonidos</span>
+          </button>
+        </nav>
+      )}
+
+      {/* 4. Panel Modal de Administrador */}
+      {isAdminOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md p-5 shadow-2xl flex flex-col gap-4 max-h-[85vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b pb-2">
+              <h3 className="font-bold text-base text-stone-800 flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-emerald-800" /> Panel Exclusivo Administrador
+              </h3>
+              <button onClick={() => setIsAdminOpen(false)} className="text-stone-400 hover:text-stone-700 text-lg">✕</button>
+            </div>
+
+            {!isAdminAuthenticated ? (
+              <div className="flex flex-col gap-3 py-2">
+                <label className="text-xs text-stone-600">Introduce el PIN maestro de seguridad:</label>
+                <input
+                  type="password"
+                  value={adminPin}
+                  onChange={(e) => setAdminPin(e.target.value)}
+                  placeholder="PIN"
+                  maxLength={6}
+                  className="border p-2 rounded-lg text-center font-bold tracking-widest text-lg"
+                />
+                <button
+                  onClick={() => {
+                    if (adminPin === '2025') {
+                      setIsAdminAuthenticated(true);
+                    } else {
+                      alert('PIN incorrecto.');
+                    }
+                  }}
+                  className="bg-emerald-800 text-white font-bold py-2 rounded-lg text-xs"
+                >
+                  Acceder
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4 text-xs">
+                {/* Modificar CLABE SPEI */}
+                <div className="bg-stone-50 p-3 rounded-lg border flex flex-col gap-2">
+                  <span className="font-bold text-stone-800">Cuenta CLABE para Recargas de Conductores</span>
+                  <input
+                    type="text"
+                    value={systemSettings.clabe_number}
+                    onChange={(e) => setSystemSettings({ ...systemSettings, clabe_number: e.target.value })}
+                    className="border p-1.5 rounded font-mono"
+                    placeholder="18 dígitos"
+                  />
+                  <input
+                    type="text"
+                    value={systemSettings.bank_name}
+                    onChange={(e) => setSystemSettings({ ...systemSettings, bank_name: e.target.value })}
+                    className="border p-1.5 rounded"
+                    placeholder="Banco"
+                  />
+                  <input
+                    type="text"
+                    value={systemSettings.account_holder}
+                    onChange={(e) => setSystemSettings({ ...systemSettings, account_holder: e.target.value })}
+                    className="border p-1.5 rounded"
+                    placeholder="Titular"
+                  />
+                  <button 
+                    onClick={() => alert('Datos bancarios actualizados correctamente.')}
+                    className="bg-emerald-800 text-white py-1 rounded font-bold"
+                  >
+                    Guardar Cuenta
+                  </button>
+                </div>
+
+                {/* Recargas por Confirmar */}
+                <div className="border rounded-lg p-3">
+                  <span className="font-bold text-stone-800 block mb-2">Validación de Transferencias SPEI</span>
+                  <div className="flex flex-col gap-2">
+                    <div className="p-2 border rounded bg-amber-50 flex justify-between items-center">
+                      <div>
+                        <p className="font-bold text-stone-800">$100.00 MXN</p>
+                        <p className="text-[10px] text-stone-500">Conductor: Juan Pérez (Taxi 14)</p>
+                      </div>
+                      <div className="flex gap-1">
+                        <button 
+                          onClick={() => {
+                            sound.play('recarga_confirmada');
+                            alert('Saldo acreditado al conductor tras verificar el depósito bancario.');
+                          }}
+                          className="bg-emerald-700 text-white px-2 py-1 rounded text-[10px] font-bold"
+                        >
+                          Aprobar
+                        </button>
+                        <button className="bg-red-700 text-white px-2 py-1 rounded text-[10px] font-bold">
+                          Rechazar
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="text-[10px] text-stone-400 text-center">
+                  Ruta Costa — San Andrés Tuxtla, Veracruz. Todos los derechos reservados.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default App;
